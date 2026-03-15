@@ -1,6 +1,6 @@
 import { Table, Tag, Modal, Descriptions, Spin, Button, Alert } from 'antd'
 import { RobotOutlined, LinkOutlined } from '@ant-design/icons'
-import { useState } from 'react'
+import { useState, memo } from 'react'
 import { getStandardDetail, getStandardSummary } from '../api/client'
 
 const statusColorMap = {
@@ -9,7 +9,7 @@ const statusColorMap = {
   '废止': 'red',
 }
 
-export default function StandardTable({ data, loading, pagination, onPageChange }) {
+export default memo(function StandardTable({ data, loading, pagination, onPageChange }) {
   const [detail, setDetail] = useState(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
@@ -179,4 +179,4 @@ export default function StandardTable({ data, loading, pagination, onPageChange 
       </Modal>
     </>
   )
-}
+})

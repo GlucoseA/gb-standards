@@ -4,7 +4,7 @@ import threading
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from .database import init_db, SessionLocal
 from .models import Standard
@@ -141,7 +141,7 @@ app.add_middleware(
     allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", "X-AI-API-Key", "X-AI-API-URL", "X-AI-Model"],
 )
 
 app.include_router(standards.router)
@@ -197,6 +197,21 @@ def get_scraper_status():
 # @app.get("/api/ai-config")
 # @app.put("/api/ai-config")
 # @app.post("/api/ai-config/test")
+
+
+@app.get("/api/ai-test")
+def test_ai_connection(request: Request):
+    """测试 AI 连接（使用客户端提供的配置或服务端配置）"""
+    from .ai_summary import test_connection
+    api_key = request.headers.get("x-ai-api-key")
+    client_config = None
+    if api_key:
+        client_config = {
+            "api_key": api_key,
+            "api_url": request.headers.get("x-ai-api-url", ""),
+            "model": request.headers.get("x-ai-model", ""),
+        }
+    return test_connection(client_config)
 
 
 # ========== 向量搜索接口 ==========

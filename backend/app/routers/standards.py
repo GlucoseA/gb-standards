@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, Query, HTTPException, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, and_
 from datetime import datetime
@@ -7,6 +7,18 @@ from ..database import get_db
 from ..models import Standard
 from ..schemas import StandardBrief, StandardDetail, SearchResponse
 from ..scraper.gb_scraper import fetch_detail
+
+
+def _extract_ai_config(request: Request) -> dict | None:
+    """从请求头提取客户端提供的 AI 配置"""
+    api_key = request.headers.get("x-ai-api-key")
+    if not api_key:
+        return None
+    return {
+        "api_key": api_key,
+        "api_url": request.headers.get("x-ai-api-url", ""),
+        "model": request.headers.get("x-ai-model", ""),
+    }
 
 router = APIRouter(prefix="/api/standards", tags=["standards"])
 
@@ -138,13 +150,15 @@ def get_standard_live_detail(standard_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/{standard_id}/summary")
-def get_standard_summary(standard_id: int, db: Session = Depends(get_db)):
-    """爬取详情后调用 DeepSeek AI 生成通俗摘要"""
+def get_standard_summary(standard_id: int, request: Request, db: Session = Depends(get_db)):
+    """爬取详情后调用 LLM API 生成通俗摘要"""
     from ..ai_summary import summarize_standard_rich
 
     standard = db.query(Standard).filter(Standard.id == standard_id).first()
     if not standard:
         raise HTTPException(status_code=404, detail="标准未找到")
+
+    client_config = _extract_ai_config(request)
 
     # 先爬取详情获取完整信息
     raw_fields = {}
@@ -162,6 +176,7 @@ def get_standard_summary(standard_id: int, db: Session = Depends(get_db)):
         cn_name=standard.cn_name,
         status=standard.status or "",
         raw_fields=raw_fields,
+        client_config=client_config,
     )
     return {"summary": summary}
 

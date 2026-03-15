@@ -1,5 +1,22 @@
 import axios from 'axios'
 
+const STORAGE_KEY = 'gb_ai_config'
+
+function getAIHeaders() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return {}
+    const cfg = JSON.parse(raw)
+    if (!cfg?.api_key) return {}
+    const headers = { 'X-AI-API-Key': cfg.api_key }
+    if (cfg.api_url) headers['X-AI-API-URL'] = cfg.api_url
+    if (cfg.model) headers['X-AI-Model'] = cfg.model
+    return headers
+  } catch {
+    return {}
+  }
+}
+
 const api = axios.create({
   baseURL: '/api',
   timeout: 15000,
@@ -48,7 +65,10 @@ export async function getScraperStatus() {
 }
 
 export async function getStandardSummary(id) {
-  const { data } = await api.get(`/standards/${id}/summary`, { timeout: 30000 })
+  const { data } = await api.get(`/standards/${id}/summary`, {
+    timeout: 30000,
+    headers: getAIHeaders(),
+  })
   return data
 }
 
@@ -60,5 +80,14 @@ export async function getLiveDetail(id) {
 // 向量搜索
 export async function vectorSearch(q, topK = 20) {
   const { data } = await api.get('/vector-search', { params: { q, top_k: topK } })
+  return data
+}
+
+// 测试 AI 连接
+export async function testAIConnection() {
+  const { data } = await api.get('/ai-test', {
+    timeout: 15000,
+    headers: getAIHeaders(),
+  })
   return data
 }

@@ -1,10 +1,10 @@
 import { Input, Select, Space, Button } from 'antd'
 import { SearchOutlined } from '@ant-design/icons'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, memo } from 'react'
 
 const { Search } = Input
 
-export default function SearchBar({ onSearch, categories, loading, initialKeyword = '' }) {
+export default memo(function SearchBar({ onSearch, categories, loading, initialKeyword = '' }) {
   const [keyword, setKeyword] = useState(initialKeyword)
   const [status, setStatus] = useState('')
   const [type, setType] = useState('')
@@ -55,4 +55,4 @@ export default function SearchBar({ onSearch, categories, loading, initialKeywor
       />
     </Space>
   )
-}
+})

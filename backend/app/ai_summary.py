@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 def summarize_standard(standard_number: str, cn_name: str, status: str,
                        implement_date: str = "", abolish_date: str = "",
                        replaced_by: str = "", ics_code: str = "",
-                       ccs_code: str = "") -> str:
+                       ccs_code: str = "", client_config: dict = None) -> str:
     info_parts = [
         f"标准号: {standard_number}",
         f"标准名称: {cn_name}",
@@ -43,11 +43,11 @@ def summarize_standard(standard_number: str, cn_name: str, status: str,
 
 请直接输出摘要，不要加标题或前缀。"""
 
-    return _call_llm(prompt)
+    return _call_llm(prompt, client_config)
 
 
 def summarize_standard_rich(standard_number: str, cn_name: str, status: str,
-                            raw_fields: dict = None) -> str:
+                            raw_fields: dict = None, client_config: dict = None) -> str:
     info_parts = [
         f"标准号: {standard_number}",
         f"标准名称: {cn_name}",
@@ -72,17 +72,59 @@ def summarize_standard_rich(standard_number: str, cn_name: str, status: str,
 
 请直接输出摘要，不要加标题或前缀。语言要通俗，让没有专业背景的人也能看懂。"""
 
-    return _call_llm(prompt)
+    return _call_llm(prompt, client_config)
 
 
-def _call_llm(prompt: str) -> str:
-    config = load_config()
+def test_connection(client_config: dict = None) -> dict:
+    """测试 AI 连接是否可用"""
+    config = _resolve_config(client_config)
     api_url = config.get("api_url", "")
     api_key = config.get("api_key", "")
     model = config.get("model", "")
 
     if not api_url or not api_key:
-        return "请先在设置页面配置 AI API 地址和密钥"
+        return {"success": False, "message": "未配置 API 地址或密钥"}
+
+    try:
+        resp = requests.post(
+            api_url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "max_tokens": 10,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return {"success": True, "message": f"连接成功，模型: {model}"}
+    except Exception as e:
+        return {"success": False, "message": f"连接失败: {str(e)}"}
+
+
+def _resolve_config(client_config: dict = None) -> dict:
+    """优先使用客户端提供的配置，否则回退到服务端配置"""
+    if client_config and client_config.get("api_key"):
+        server_cfg = load_config()
+        return {
+            "api_url": client_config.get("api_url") or server_cfg.get("api_url", ""),
+            "api_key": client_config["api_key"],
+            "model": client_config.get("model") or server_cfg.get("model", ""),
+        }
+    return load_config()
+
+
+def _call_llm(prompt: str, client_config: dict = None) -> str:
+    config = _resolve_config(client_config)
+    api_url = config.get("api_url", "")
+    api_key = config.get("api_key", "")
+    model = config.get("model", "")
+
+    if not api_url or not api_key:
+        return "请先在 AI 设置中配置 API 地址和密钥"
 
     try:
         resp = requests.post(

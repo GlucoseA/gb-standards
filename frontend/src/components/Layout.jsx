@@ -1,5 +1,5 @@
 import { Layout as AntLayout, Menu } from 'antd'
-import { SearchOutlined, UnorderedListOutlined, HomeOutlined } from '@ant-design/icons'
+import { SearchOutlined, UnorderedListOutlined, HomeOutlined, SettingOutlined } from '@ant-design/icons'
 import { useNavigate, useLocation } from 'react-router-dom'
 
 const { Header, Content, Footer } = AntLayout
@@ -8,6 +8,7 @@ const menuItems = [
   { key: '/', icon: <HomeOutlined />, label: '首页' },
   { key: '/search', icon: <SearchOutlined />, label: '标准查询' },
   { key: '/calendar', icon: <UnorderedListOutlined />, label: '标准总览' },
+  { key: '/ai-config', icon: <SettingOutlined />, label: 'AI 设置' },
 ]
 
 export default function Layout({ children }) {
