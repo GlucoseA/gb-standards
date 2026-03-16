@@ -8,7 +8,7 @@ const menuItems = [
   { key: '/', icon: <HomeOutlined />, label: '首页' },
   { key: '/search', icon: <SearchOutlined />, label: '标准查询' },
   { key: '/calendar', icon: <UnorderedListOutlined />, label: '标准总览' },
-  { key: '/ai-config', icon: <SettingOutlined />, label: 'AI 设置' },
+  { key: '/ai-config', icon: <SettingOutlined />, label: 'LLM API 设定' },
 ]
 
 export default function Layout({ children }) {

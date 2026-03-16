@@ -33,15 +33,9 @@ def summarize_standard(standard_number: str, cn_name: str, status: str,
 
     standard_info = "\n".join(info_parts)
 
-    prompt = f"""你是一个国家标准解读专家。请根据以下国家标准信息，用通俗易懂的语言为普通消费者生成一段简明摘要（150字以内），重点说明：
-1. 这个标准是关于什么的（涉及哪类商品/产品）
-2. 对消费者购物有什么参考价值
-3. 当前状态（是否生效、是否即将废止等）
+    prompt = f"""基于以下国家标准信息，生成一段专业简明的解读（100字以内）。要求：说明标准适用范围、核心规范内容、当前效力状态。直接输出，无需标题。
 
-标准信息：
-{standard_info}
-
-请直接输出摘要，不要加标题或前缀。"""
+{standard_info}"""
 
     return _call_llm(prompt, client_config)
 
@@ -61,16 +55,9 @@ def summarize_standard_rich(standard_number: str, cn_name: str, status: str,
 
     standard_info = "\n".join(info_parts)
 
-    prompt = f"""你是一个国家标准解读专家。请根据以下从国家标准委官网爬取的标准详细信息，用通俗易懂的语言为普通消费者生成一段摘要（200字以内），重点说明：
-1. 这个标准具体规范了什么（涉及哪类商品/产品/行业）
-2. 对普通消费者购物或日常生活有什么实际参考价值
-3. 当前状态说明（是否已生效、即将实施、或已废止）
-4. 如果有归口部门或主管部门，简要说明由谁负责监管
+    prompt = f"""基于以下国家标准详细信息，生成专业简明的解读（150字以内）。要求：说明适用范围与核心规范内容、当前效力状态、归口管理部门（如有）。直接输出，无需标题。
 
-标准完整信息：
-{standard_info}
-
-请直接输出摘要，不要加标题或前缀。语言要通俗，让没有专业背景的人也能看懂。"""
+{standard_info}"""
 
     return _call_llm(prompt, client_config)
 
@@ -124,7 +111,7 @@ def _call_llm(prompt: str, client_config: dict = None) -> str:
     model = config.get("model", "")
 
     if not api_url or not api_key:
-        return "请先在 AI 设置中配置 API 地址和密钥"
+        return "请先在 LLM API 设定中配置接口地址和密钥"
 
     try:
         resp = requests.post(

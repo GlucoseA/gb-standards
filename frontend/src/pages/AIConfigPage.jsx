@@ -50,7 +50,7 @@ export default function AIConfigPage() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(config))
     setSaved(true)
     setTestResult(null)
-    message.success('AI 配置已保存')
+    message.success('配置已保存')
   }
 
   const handleClear = () => {
@@ -64,12 +64,8 @@ export default function AIConfigPage() {
   const handleTest = async () => {
     setTesting(true)
     setTestResult(null)
-    try {
-      const res = await testAIConnection()
-      setTestResult(res)
-    } catch (e) {
-      setTestResult({ success: false, message: e.message || '连接测试失败' })
-    }
+    const res = await testAIConnection()
+    setTestResult(res)
     setTesting(false)
   }
 
@@ -103,10 +99,10 @@ export default function AIConfigPage() {
             <RobotOutlined style={{ fontSize: 28, color: '#fff' }} />
           </div>
           <h2 style={{ fontSize: 20, fontWeight: 700, color: '#1d2129', marginBottom: 4 }}>
-            AI 智能解读
+            LLM API 设定
           </h2>
           <p style={{ fontSize: 13, color: '#86909c', margin: 0 }}>
-            配置 LLM 接口以启用 AI 标准解读功能
+            配置大语言模型接口，启用标准智能解读
           </p>
         </div>
 

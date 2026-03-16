@@ -6,6 +6,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from .database import init_db, SessionLocal
 from .models import Standard
 from .routers import standards, calendar
@@ -41,7 +43,7 @@ async def lifespan(app):
 
 
 def _startup_sync():
-    """启动时同步：空库全量，否则增量"""
+    """启动时同步：空库全量，否则增量；同步后自动构建向量索引"""
     db = SessionLocal()
     try:
         total = db.query(Standard).count()
@@ -53,6 +55,33 @@ def _startup_sync():
             _run_incremental_sync()
     except Exception as e:
         logger.error(f"启动同步失败: {e}", exc_info=True)
+    finally:
+        db.close()
+
+    # 同步完成后，自动构建向量索引（如果不存在且配置了 Embedding Key）
+    _auto_build_vector_index()
+
+
+def _auto_build_vector_index():
+    """如果向量索引不存在且有数据和 Embedding Key，自动构建"""
+    from .config_manager import load_embedding_config
+    status = vector_search.get_index_status()
+    if status["exists"]:
+        logger.info(f"向量索引已存在: {status['count']} 条，跳过构建")
+        return
+    config = load_embedding_config()
+    if not config.get("embedding_key"):
+        logger.info("未配置 Embedding API Key，跳过向量索引自动构建")
+        return
+    db = SessionLocal()
+    try:
+        total = db.query(Standard).count()
+        if total == 0:
+            return
+        logger.info(f"检测到 {total} 条标准但无向量索引，开始自动构建...")
+        vector_search.build_index(db)
+    except Exception as e:
+        logger.error(f"自动构建向量索引失败: {e}", exc_info=True)
     finally:
         db.close()
 
@@ -140,7 +169,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "X-AI-API-Key", "X-AI-API-URL", "X-AI-Model"],
 )
 
@@ -199,7 +228,7 @@ def get_scraper_status():
 # @app.post("/api/ai-config/test")
 
 
-@app.get("/api/ai-test")
+@app.post("/api/ai-test")
 def test_ai_connection(request: Request):
     """测试 AI 连接（使用客户端提供的配置或服务端配置）"""
     from .ai_summary import test_connection
@@ -216,13 +245,42 @@ def test_ai_connection(request: Request):
 
 # ========== 向量搜索接口 ==========
 
-## 向量索引管理接口已禁用（索引应在部署前预构建）
-# @app.get("/api/vector-search/status")
-# @app.post("/api/vector-search/build")
+@app.get("/api/vector-search/status")
+def get_vector_status():
+    """查看向量索引状态"""
+    return vector_search.get_index_status()
+
+
+@app.post("/api/vector-search/build")
+def trigger_vector_build(force_full: bool = False):
+    """手动触发向量索引构建，force_full=true 时全量重建"""
+    status = vector_search.get_index_status()
+    if status["is_building"]:
+        return {"success": False, "message": "向量索引正在构建中，请稍后再试"}
+
+    mode = "全量" if force_full else "增量"
+
+    def _build():
+        db = SessionLocal()
+        try:
+            vector_search.build_index(db, force_full=force_full)
+        finally:
+            db.close()
+
+    threading.Thread(target=_build, daemon=True).start()
+    return {"success": True, "message": f"向量索引{mode}构建已启动，请稍后查看状态"}
+
+
+# ========== 前端静态文件服务 ==========
+STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
+
+if os.path.isdir(STATIC_DIR):
+    # 服务 JS/CSS/图片等静态资源
+    app.mount("/assets", StaticFiles(directory=os.path.join(STATIC_DIR, "assets")), name="static-assets")
 
 
 @app.get("/api/vector-search")
-def do_vector_search(q: str = "", top_k: int = 20):
+def do_vector_search(q: str = "", top_k: int = 20, request: Request = None):
     """语义搜索接口"""
     if not q.strip():
         return {"items": [], "total": 0, "query": q}
@@ -253,3 +311,16 @@ def do_vector_search(q: str = "", top_k: int = 20):
         return {"items": items, "total": len(items), "query": q}
     finally:
         db.close()
+
+
+# ========== SPA Fallback ==========
+if os.path.isdir(STATIC_DIR):
+    _index_html = os.path.join(STATIC_DIR, "index.html")
+
+    @app.get("/{full_path:path}")
+    def spa_fallback(full_path: str):
+        # 尝试返回静态文件，否则返回 index.html（SPA 路由）
+        file_path = os.path.join(STATIC_DIR, full_path)
+        if full_path and os.path.isfile(file_path):
+            return FileResponse(file_path)
+        return FileResponse(_index_html)

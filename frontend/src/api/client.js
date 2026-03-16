@@ -85,9 +85,15 @@ export async function vectorSearch(q, topK = 20) {
 
 // 测试 AI 连接
 export async function testAIConnection() {
-  const { data } = await api.get('/ai-test', {
-    timeout: 15000,
-    headers: getAIHeaders(),
-  })
-  return data
+  try {
+    const { data } = await api.post('/ai-test', null, {
+      timeout: 30000,
+      headers: getAIHeaders(),
+    })
+    return data
+  } catch (e) {
+    // 如果后端返回了 JSON 响应，优先使用
+    if (e.response?.data) return e.response.data
+    return { success: false, message: e.message || '连接测试失败' }
+  }
 }
