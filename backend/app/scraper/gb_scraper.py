@@ -1,15 +1,20 @@
 """
-国家标准委官网爬虫
+国家标准委官网爬虫 — PDF 下载版
 数据来源: https://openstd.samr.gov.cn/bzgk/gb/std_list
+PDF来源:  http://c.gb688.cn/bzgk/gb/showGb -> viewGb
 """
 
+import os
 import re
 import time
 import logging
 import threading
+import random
 import requests
+import ddddocr
 from bs4 import BeautifulSoup
 from datetime import datetime, date
+from pathlib import Path
 from sqlalchemy.orm import Session
 
 from ..models import Standard
@@ -20,12 +25,19 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://openstd.samr.gov.cn/bzgk/gb"
 LIST_URL = f"{BASE_URL}/std_list"
 DETAIL_URL = f"{BASE_URL}/newGbInfo"
+PDF_HOST = "http://c.gb688.cn/bzgk/gb"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
 }
+
+# PDF 存储目录
+_data_dir = os.getenv("DATA_DIR", os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+PDF_DIR = Path(_data_dir) / "pdfs"
+PDF_DIR.mkdir(parents=True, exist_ok=True)
 
 # 爬虫状态
 _scraper_lock = threading.Lock()
@@ -33,6 +45,14 @@ scraper_state = {
     "is_running": False,
     "last_run": None,
     "message": "未运行",
+}
+
+# 标准类型映射: p.p1 参数值 -> 中文名称
+STANDARD_TYPES = {
+    0: "",       # 全部
+    1: "强制性国家标准",
+    2: "推荐性国家标准",
+    3: "指导性技术文件",
 }
 
 
@@ -49,13 +69,12 @@ def parse_date(date_str: str) -> date | None:
     return None
 
 
-# 标准类型映射: p.p1 参数值 -> 中文名称
-STANDARD_TYPES = {
-    0: "",       # 全部
-    1: "强制性国家标准",
-    2: "推荐性国家标准",
-    3: "指导性技术文件",
-}
+def _sanitize_filename(name: str) -> str:
+    """将标准编号转为安全文件名"""
+    # GB/T 1234-2024 -> GB_T_1234-2024
+    name = name.replace("/", "_").replace("\\", "_")
+    name = re.sub(r'[<>:"|?*\s]+', "_", name)
+    return name.strip("_")
 
 
 def fetch_list_page(page: int = 1, page_size: int = 50, keyword: str = "",
@@ -131,7 +150,7 @@ def fetch_list_page(page: int = 1, page_size: int = 50, keyword: str = "",
 
 
 def fetch_detail(hcno: str) -> dict:
-    """爬取标准详情页，返回所有字段（包括原始键值对）"""
+    """爬取标准详情页，返回所有字段"""
     try:
         resp = requests.get(DETAIL_URL, params={"hcno": hcno}, headers=HEADERS, timeout=30)
         resp.encoding = "utf-8"
@@ -142,13 +161,10 @@ def fetch_detail(hcno: str) -> dict:
 
     soup = BeautifulSoup(resp.text, "lxml")
     detail = {}
-    raw_fields = {}  # 保存所有原始字段供 AI 使用
 
-    # 详情页使用 Bootstrap grid: div.title + div.content
     title_divs = soup.find_all("div", class_="title")
     for title_div in title_divs:
         label = title_div.get_text(strip=True)
-        # 找同一行的 content div
         content_div = title_div.find_next_sibling("div", class_="content")
         if not content_div:
             parent = title_div.parent
@@ -160,9 +176,6 @@ def fetch_detail(hcno: str) -> dict:
         if not label or not value:
             continue
 
-        raw_fields[label] = value
-
-        # 映射到数据库字段
         if "ICS" in label:
             detail["ics_code"] = value
         elif "CCS" in label or "中标分类" in label:
@@ -180,16 +193,6 @@ def fetch_detail(hcno: str) -> dict:
         elif "英文" in label and "名称" in label:
             detail["en_name"] = value
 
-    # 也尝试从 table 提取（兼容旧版页面）
-    for row in soup.find_all("tr"):
-        cells = row.find_all(["th", "td"])
-        if len(cells) >= 2:
-            label = cells[0].get_text(strip=True)
-            value = cells[1].get_text(strip=True)
-            if label and value:
-                raw_fields[label] = value
-
-    detail["_raw_fields"] = raw_fields
     return detail
 
 
@@ -223,7 +226,6 @@ def save_standards(db: Session, standards: list[dict]):
     if not hcnos:
         return 0
 
-    # 批量查已有记录，避免 N+1
     existing_map = {}
     for row in db.query(Standard).filter(Standard.hcno.in_(hcnos)).all():
         existing_map[row.hcno] = row
@@ -251,15 +253,88 @@ def save_standards(db: Session, standards: list[dict]):
     return new_count
 
 
-import random as _random
+# ========== PDF 下载 ==========
+
+def _solve_captcha(session: requests.Session) -> bool:
+    """获取并识别验证码，返回是否成功"""
+    ocr = ddddocr.DdddOcr(show_ad=False)
+    for attempt in range(5):
+        try:
+            resp = session.get(f"{PDF_HOST}/gc", timeout=15)
+            if resp.status_code != 200 or len(resp.content) < 100:
+                continue
+            code = ocr.classification(resp.content)
+            if not code or len(code) < 3:
+                continue
+
+            resp_verify = session.post(
+                f"{PDF_HOST}/verifyCode",
+                data={"verifyCode": code},
+                timeout=15,
+            )
+            if resp_verify.text.strip() == "success":
+                logger.debug(f"验证码识别成功 (attempt {attempt+1}): {code}")
+                return True
+            logger.debug(f"验证码识别失败 (attempt {attempt+1}): {code}")
+        except Exception as e:
+            logger.warning(f"验证码流程异常: {e}")
+        time.sleep(0.5)
+    return False
+
+
+def download_pdf(hcno: str, standard_number: str) -> tuple[str, int]:
+    """下载单个标准的 PDF 文件
+    返回 (保存路径, 文件大小) 或 ("", 0) 表示失败
+    """
+    filename = _sanitize_filename(standard_number) + ".pdf"
+    filepath = PDF_DIR / filename
+
+    # 已下载则跳过
+    if filepath.exists() and filepath.stat().st_size > 1000:
+        return str(filepath), filepath.stat().st_size
+
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    session.headers["Referer"] = f"{PDF_HOST}/showGb?type=online&hcno={hcno}"
+
+    # 访问在线阅读页以建立会话
+    try:
+        session.get(f"{PDF_HOST}/showGb?type=online&hcno={hcno}", timeout=30)
+    except requests.RequestException as e:
+        logger.error(f"访问阅读页失败 ({standard_number}): {e}")
+        return "", 0
+
+    # 识别验证码
+    if not _solve_captcha(session):
+        logger.warning(f"验证码识别失败，跳过 {standard_number}")
+        return "", 0
+
+    # 下载 PDF
+    try:
+        resp = session.get(f"{PDF_HOST}/viewGb?hcno={hcno}", timeout=120)
+        if resp.status_code != 200:
+            logger.warning(f"PDF 下载返回 {resp.status_code} ({standard_number})")
+            return "", 0
+        if len(resp.content) < 1000 or not resp.content.startswith(b"%PDF"):
+            logger.warning(f"PDF 内容无效 ({standard_number}), size={len(resp.content)}")
+            return "", 0
+
+        filepath.write_bytes(resp.content)
+        logger.info(f"PDF 下载成功: {filename} ({len(resp.content)} bytes)")
+        return str(filepath), len(resp.content)
+
+    except requests.RequestException as e:
+        logger.error(f"PDF 下载失败 ({standard_number}): {e}")
+        return "", 0
 
 
 def run_scraper(max_pages: int = 0, fetch_details: bool = True, delay: float = 1.0,
-                std_types: list[int] | None = None):
+                std_types: list[int] | None = None, download_pdfs: bool = False):
     """
     运行爬虫，分类型爬取
     max_pages: 每种类型的最大爬取页数，0 表示全部
     std_types: 要爬取的类型列表 [1,2,3]，None 表示全部三种
+    download_pdfs: 是否下载 PDF 文件
     """
     global scraper_state
     with _scraper_lock:
@@ -275,7 +350,7 @@ def run_scraper(max_pages: int = 0, fetch_details: bool = True, delay: float = 1
     init_db()
     db = SessionLocal()
 
-    # 先统计各类型总页数，计算整体进度
+    # 先统计各类型总页数
     type_pages = {}
     for st in std_types:
         tp = get_total_pages(page_size=50, std_type=st)
@@ -290,6 +365,8 @@ def run_scraper(max_pages: int = 0, fetch_details: bool = True, delay: float = 1
 
     try:
         total_saved = 0
+        pdf_downloaded = 0
+        pdf_failed = 0
 
         for std_type in std_types:
             type_name = STANDARD_TYPES.get(std_type, f"类型{std_type}")
@@ -299,9 +376,10 @@ def run_scraper(max_pages: int = 0, fetch_details: bool = True, delay: float = 1
 
             for page in range(1, total_pages + 1):
                 pct = int(pages_done / grand_total_pages * 100) if grand_total_pages else 0
+                pdf_msg = f"，PDF已下载 {pdf_downloaded}" if download_pdfs else ""
                 scraper_state["message"] = (
                     f"[{pct}%] 正在爬取【{type_name}】第 {page}/{total_pages} 页 "
-                    f"(总进度 {pages_done}/{grand_total_pages}，已入库 {total_saved} 条)"
+                    f"(总进度 {pages_done}/{grand_total_pages}，已入库 {total_saved} 条{pdf_msg})"
                 )
 
                 standards = fetch_list_page(page=page, std_type=std_type)
@@ -310,7 +388,7 @@ def run_scraper(max_pages: int = 0, fetch_details: bool = True, delay: float = 1
                     consecutive_errors += 1
                     logger.warning(f"第 {page} 页无数据 (连续失败 {consecutive_errors})")
                     if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                        logger.error(f"连续 {MAX_CONSECUTIVE_ERRORS} 页无数据，可能被限流，暂停 30s")
+                        logger.error(f"连续 {MAX_CONSECUTIVE_ERRORS} 页无数据，暂停 30s")
                         scraper_state["message"] = f"[{pct}%] 被限流，暂停 30s 后重试..."
                         time.sleep(30)
                         consecutive_errors = 0
@@ -329,26 +407,57 @@ def run_scraper(max_pages: int = 0, fetch_details: bool = True, delay: float = 1
                     for std in standards:
                         if std.get("hcno"):
                             detail = fetch_detail(std["hcno"])
-                            detail.pop("_raw_fields", None)
                             std.update(detail)
                             time.sleep(delay * 0.5)
 
                 save_standards(db, standards)
                 total_saved += len(standards)
+
+                # PDF 下载
+                if download_pdfs:
+                    for std in standards:
+                        hcno = std.get("hcno")
+                        sn = std.get("standard_number", "")
+                        if not hcno or not sn:
+                            continue
+
+                        # 检查是否已下载
+                        existing = db.query(Standard).filter(Standard.hcno == hcno).first()
+                        if existing and existing.pdf_path and os.path.exists(existing.pdf_path):
+                            continue
+
+                        pdf_path, pdf_size = download_pdf(hcno, sn)
+                        if pdf_path:
+                            if existing:
+                                existing.pdf_path = pdf_path
+                                existing.pdf_size = pdf_size
+                                existing.pdf_downloaded_at = datetime.now()
+                                db.commit()
+                            pdf_downloaded += 1
+                        else:
+                            pdf_failed += 1
+
+                        # PDF 下载间隔，避免触发限流
+                        time.sleep(delay + random.uniform(0.5, 1.5))
+
                 pages_done += 1
 
-                # 自适应延迟：随机化 + 每 50 页多休息一下
-                jitter = delay + _random.uniform(0, delay * 0.5)
+                # 自适应延迟
+                jitter = delay + random.uniform(0, delay * 0.5)
                 if pages_done % 50 == 0:
                     logger.info(f"已完成 {pages_done} 页，短暂休息 5s...")
                     time.sleep(5)
                 else:
                     time.sleep(jitter)
 
+        pdf_msg = f"，PDF下载 {pdf_downloaded} 个" if download_pdfs else ""
+        if pdf_failed:
+            pdf_msg += f"（{pdf_failed} 个失败）"
+
         with _scraper_lock:
-            scraper_state["message"] = f"爬取完成，共保存 {total_saved} 条标准"
+            scraper_state["message"] = f"爬取完成，共保存 {total_saved} 条标准{pdf_msg}"
             scraper_state["last_run"] = datetime.now()
-        logger.info(f"爬取完成，共保存 {total_saved} 条标准")
+        logger.info(f"爬取完成，共保存 {total_saved} 条标准{pdf_msg}")
 
     except Exception as e:
         with _scraper_lock:
@@ -360,7 +469,79 @@ def run_scraper(max_pages: int = 0, fetch_details: bool = True, delay: float = 1
         db.close()
 
 
+def run_pdf_download(max_items: int = 0, delay: float = 2.0,
+                     std_types: list[int] | None = None):
+    """
+    仅下载 PDF（对已入库但未下载 PDF 的标准）
+    max_items: 最多下载数量，0 表示全部
+    """
+    global scraper_state
+    with _scraper_lock:
+        if scraper_state["is_running"]:
+            logger.warning("爬虫已在运行中，跳过")
+            return
+        scraper_state["is_running"] = True
+        scraper_state["message"] = "正在下载 PDF..."
+
+    init_db()
+    db = SessionLocal()
+
+    try:
+        # 查找未下载 PDF 的标准
+        query = db.query(Standard).filter(
+            (Standard.pdf_path == "") | (Standard.pdf_path.is_(None))
+        )
+        if std_types:
+            type_names = [STANDARD_TYPES.get(t, "") for t in std_types if t in STANDARD_TYPES]
+            if type_names:
+                query = query.filter(Standard.standard_type.in_(type_names))
+
+        pending = query.all()
+        total = len(pending)
+        if max_items > 0:
+            pending = pending[:max_items]
+            total = len(pending)
+
+        logger.info(f"待下载 PDF: {total} 个")
+        downloaded = 0
+        failed = 0
+
+        for i, std in enumerate(pending):
+            pct = int((i + 1) / total * 100) if total else 0
+            scraper_state["message"] = (
+                f"[{pct}%] 正在下载 PDF ({i+1}/{total}) "
+                f"{std.standard_number} — 成功 {downloaded}，失败 {failed}"
+            )
+
+            pdf_path, pdf_size = download_pdf(std.hcno, std.standard_number)
+            if pdf_path:
+                std.pdf_path = pdf_path
+                std.pdf_size = pdf_size
+                std.pdf_downloaded_at = datetime.now()
+                db.commit()
+                downloaded += 1
+            else:
+                failed += 1
+
+            time.sleep(delay + random.uniform(0.5, 1.5))
+
+        with _scraper_lock:
+            scraper_state["message"] = f"PDF 下载完成: 成功 {downloaded}，失败 {failed}"
+            scraper_state["last_run"] = datetime.now()
+        logger.info(f"PDF 下载完成: 成功 {downloaded}，失败 {failed}")
+
+    except Exception as e:
+        with _scraper_lock:
+            scraper_state["message"] = f"PDF 下载失败: {str(e)}"
+        logger.error(f"PDF 下载失败: {e}", exc_info=True)
+    finally:
+        with _scraper_lock:
+            scraper_state["is_running"] = False
+        db.close()
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-    # 默认每种类型爬取前 3 页
-    run_scraper(max_pages=3, fetch_details=False, delay=1.0)
+    # 测试：爬取 1 页 + 下载 PDF
+    run_scraper(max_pages=1, fetch_details=False, delay=1.0,
+                std_types=[1], download_pdfs=True)

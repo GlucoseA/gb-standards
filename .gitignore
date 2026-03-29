@@ -16,6 +16,7 @@ dist/
 backend/ai_config.json
 backend/*.db
 backend/vectors/
+backend/pdfs/
 
 # IDE
 .vscode/

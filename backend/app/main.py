@@ -8,32 +8,26 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .database import init_db, SessionLocal
 from .models import Standard
-from .scraper.gb_scraper import run_scraper, scraper_state
+from .scraper.gb_scraper import run_scraper, run_pdf_download, scraper_state, PDF_DIR
 from .schemas import ScraperStatus
 
 logger = logging.getLogger(__name__)
 
 # ========== 定时同步策略 ==========
-# 增量同步：每 12 小时，爬取每种类型前 3 页（~450 条最新的），捕获新增/变更
-# 全量同步：每 7 天，完整爬取一次，确保不遗漏
-# 启动时：数据库空则全量，否则快速增量
 INCREMENTAL_PAGES = 3             # 增量同步每种类型爬几页
 INCREMENTAL_INTERVAL_HOURS = 12   # 增量同步间隔
 FULL_SYNC_INTERVAL_DAYS = 7       # 全量同步间隔
 
-# 记录上次同步时间
 _sync_state = {
-    "last_incremental": None,   # datetime
-    "last_full": None,          # datetime
+    "last_incremental": None,
+    "last_full": None,
 }
 
 
 @asynccontextmanager
 async def lifespan(app):
     init_db()
-    # 启动时做一次同步判断
     threading.Thread(target=_startup_sync, daemon=True).start()
-    # 启动定时调度器
     threading.Thread(target=_scheduler_loop, daemon=True).start()
     yield
 
@@ -56,7 +50,7 @@ def _startup_sync():
 
 
 def _run_incremental_sync():
-    """增量同步：只爬最新几页"""
+    """增量同步：只爬最新几页，含 PDF 下载"""
     if scraper_state["is_running"]:
         return
     logger.info(f"开始增量同步（每种类型前 {INCREMENTAL_PAGES} 页）...")
@@ -65,12 +59,13 @@ def _run_incremental_sync():
         fetch_details=False,
         delay=0.8,
         std_types=[1, 2, 3],
+        download_pdfs=True,
     )
     _sync_state["last_incremental"] = datetime.now()
 
 
 def _run_full_sync():
-    """全量同步：爬取所有页"""
+    """全量同步：爬取所有页 + PDF 下载"""
     if scraper_state["is_running"]:
         return
     logger.info("开始全量同步...")
@@ -79,23 +74,21 @@ def _run_full_sync():
         fetch_details=False,
         delay=0.8,
         std_types=[1, 2, 3],
+        download_pdfs=True,
     )
     _sync_state["last_full"] = datetime.now()
     _sync_state["last_incremental"] = datetime.now()
 
 
 def _scheduler_loop():
-    """后台定时调度：增量 12h，全量 7d"""
-    # 等待启动同步完成
+    """后台定时调度"""
     time.sleep(30)
 
     while True:
         try:
             now = datetime.now()
 
-            # 全量同步判断（优先级高）
             if _sync_state["last_full"] is None:
-                # 从数据库推断上次全量时间
                 db = SessionLocal()
                 try:
                     oldest = db.query(Standard).order_by(Standard.scraped_at.asc()).first()
@@ -111,13 +104,11 @@ def _scheduler_loop():
                 if not scraper_state["is_running"]:
                     logger.info(f"距上次全量已 {full_age.days} 天，触发全量同步")
                     threading.Thread(target=_run_full_sync, daemon=True).start()
-                    # 全量同步耗时长，等它完成后再继续调度
                     while scraper_state["is_running"]:
                         time.sleep(60)
                     time.sleep(60)
                     continue
 
-            # 增量同步判断
             inc_age = now - (_sync_state["last_incremental"] or datetime.min)
             if inc_age >= timedelta(hours=INCREMENTAL_INTERVAL_HOURS):
                 if not scraper_state["is_running"]:
@@ -127,11 +118,10 @@ def _scheduler_loop():
         except Exception as e:
             logger.error(f"调度器异常: {e}", exc_info=True)
 
-        # 每 10 分钟检查一次
         time.sleep(600)
 
 
-app = FastAPI(title="GB国家标准爬虫服务", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="GB国家标准爬虫服务", version="2.0.0", lifespan=lifespan)
 
 _cors_origins = os.getenv("CORS_ORIGINS", "*").split(",")
 app.add_middleware(
@@ -152,11 +142,13 @@ def get_stats():
         active = db.query(Standard).filter(Standard.status == "现行").count()
         upcoming = db.query(Standard).filter(Standard.status == "即将实施").count()
         abolished = db.query(Standard).filter(Standard.status == "废止").count()
+        pdf_count = db.query(Standard).filter(Standard.pdf_path != "", Standard.pdf_path.isnot(None)).count()
         return {
             "total": total,
             "active": active,
             "upcoming": upcoming,
             "abolished": abolished,
+            "pdf_downloaded": pdf_count,
         }
     finally:
         db.close()
@@ -176,3 +168,16 @@ def get_scraper_status():
         )
     finally:
         db.close()
+
+
+@app.post("/api/scraper/download-pdfs")
+def trigger_pdf_download(max_items: int = 50):
+    """手动触发 PDF 下载（对已入库但未下载的标准）"""
+    if scraper_state["is_running"]:
+        return {"status": "busy", "message": "爬虫正在运行中，请稍后再试"}
+    threading.Thread(
+        target=run_pdf_download,
+        kwargs={"max_items": max_items, "delay": 2.0},
+        daemon=True,
+    ).start()
+    return {"status": "started", "message": f"开始下载 PDF（最多 {max_items} 个）"}

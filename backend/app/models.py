@@ -20,6 +20,9 @@ class Standard(Base):
     abolish_date = Column(Date, nullable=True)
     replaced_by = Column(Text, default="")
     category = Column(Text, default="")
+    pdf_path = Column(Text, default="")       # PDF 文件本地存储路径
+    pdf_size = Column(Integer, default=0)      # PDF 文件大小(bytes)
+    pdf_downloaded_at = Column(DateTime, nullable=True)  # PDF 下载时间
     scraped_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     __table_args__ = (
